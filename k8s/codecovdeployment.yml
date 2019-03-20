@@ -1,0 +1,283 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  # This name uniquely identifies the PVC. Will be used in deployment below.
+  name: minio
+  labels:
+    app: minio
+spec:
+  # Read more about access modes here: https://kubernetes.io/docs/user-guide/persistent-volumes/#access-modes
+  accessModes:
+    - ReadWriteOnce
+  resources:
+    # This is the request for storage. Should be available in the cluster.
+    requests:
+      storage: 10Gi
+  # Uncomment and add storageClass specific to your requirements below. Read more https://kubernetes.io/docs/concepts/storage/persistent-volumes/#class-1
+  #storageClassName:
+---
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  # This name uniquely identifies the Deployment
+  name: minio
+spec:
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      labels:
+        # Label is used as selector in the service.
+        app: minio
+    spec:
+      # Refer to the PVC created earlier
+      volumes:
+      - name: storage
+        persistentVolumeClaim:
+          # Name of the PVC created earlier
+          claimName: minio
+      containers:
+      - name: minio
+        # Pulls the default Minio image from Docker Hub
+        image: minio/minio
+        args:
+        - server
+        - /storage
+        env:
+        # Minio access key and secret key
+        - name: MINIO_ACCESS_KEY
+          value: "codecov-default-key"
+        - name: MINIO_SECRET_KEY
+          value: "codecov-default-secret" 
+        ports:
+        - containerPort: 9000
+        # Mount the volume into the pod
+        volumeMounts:
+        - name: storage # must match the volume name, above
+          mountPath: "/storage"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: minio
+spec:
+  type: NodePort
+  ports:
+    - port: 9000
+      targetPort: 9000
+      protocol: TCP
+  selector:
+    app: minio
+---
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  labels:
+    app: redis
+  name: redis
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+  template:
+    metadata:
+      labels:
+        app: redis
+    spec:
+      containers:
+        - image: redis:3.0.7-alpine
+          name: redis
+          volumeMounts:
+            - mountPath: /data
+              name: redis-volume
+      volumes:
+        - name: redis-volume
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: redis
+  name: redis
+spec:
+  ports:
+    - port: 6379
+      protocol: TCP
+      targetPort: 6379
+  selector:
+    app: redis
+  sessionAffinity: None
+  type: NodePort
+---
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  labels:
+    app: postgres
+  name: postgres
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: postgres
+  template:
+    metadata:
+      labels:
+        app: postgres
+    spec:
+      containers:
+        - image: postgres:10.4
+          name: postgres
+          volumeMounts:
+            - mountPath: /var/lib/postgresql/data
+              name: postgres-volume
+      volumes:
+        - name: postgres-volume
+          emptyDir: {}
+        # - name: postgres-volume
+        #   persistentVolumeClaim:
+        #     claimName: postgres-volume
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    app: postgres
+  name: postgres
+spec:
+  ports:
+    - port: 5432
+      protocol: TCP
+      targetPort: 5432
+  selector:
+    app: postgres
+  sessionAffinity: None
+  type: NodePort
+---
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: web
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: web
+    spec:
+      containers:
+        - name: web
+          image: codecov/enterprise:v4.4.4
+          env: 
+          - name: MINIO_HOST
+            value: "minio"
+          - name: MINIO_PORT
+            value: "9000"
+          # Minio access key and secret key
+          - name: MINIO_ACCESS_KEY
+            value: "codecov-default-key"
+          - name: MINIO_SECRET_KEY
+            value: "codecov-default-secret"     
+          command: [/bin/sh, -c]
+          args: [/home/codecov web]
+          ports:
+            - containerPort: 5000
+              protocol: TCP
+          volumeMounts:
+            - name: config-volume
+              mountPath: /config
+            # - name: archive-volume
+            #   mountPath: /archive
+      volumes:
+        - name: config-volume
+          configMap:
+            name: codecov-config
+            items:
+              - key: codecov.yml
+                path: codecov.yml
+        # - name: archive-volume
+        #   emptyDir: {}
+---
+kind: Service
+apiVersion: v1
+metadata:
+  labels:
+    app: web
+  name: web
+spec:
+  ports:
+    - name: web
+      port: 5000
+      protocol: TCP
+      targetPort: 5000
+  selector:
+    app: web
+  type: NodePort
+---
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: worker
+spec:
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: worker
+    spec:
+      containers:
+        - name: worker
+          image: codecov/enterprise:v4.4.4
+          env: 
+          - name: MINIO_HOST
+            value: "minio"
+          - name: MINIO_PORT
+            value: "9000"
+          # Minio access key and secret key
+          - name: MINIO_ACCESS_KEY
+            value: "codecov-default-key"
+          - name: MINIO_SECRET_KEY
+            value: "codecov-default-secret"    
+          command: [/bin/sh, -c]
+          args: [/home/codecov web]
+          volumeMounts:
+            - name: config-volume
+              mountPath: /config
+            # - name: archive-volume
+            #   mountPath: /archive
+      volumes:
+        - name: config-volume
+          configMap:
+            name: codecov-config
+            items:
+              - key: codecov.yml
+                path: codecov.yml
+        # - name: archive-volume
+        #   emptyDir: {}
+# ---
+# apiVersion: extensions/v1beta1
+# kind: Ingress
+# metadata:
+#   name: codecov
+#   annotations:
+#     kubernetes.io/ingress.class: aws-alb
+#     alb.ingress.kubernetes.io/backend-protocol: HTTP
+#     alb.ingress.kubernetes.io/certificate-arn: your-cert-arn
+#     alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS": 443}]'
+#     alb.ingress.kubernetes.io/scheme: internet-facing
+#     alb.ingress.kubernetes.io/security-groups:
+#       your-security-group
+#     alb.ingress.kubernetes.io/ssl-policy: your-ssl-policy
+#     alb.ingress.kubernetes.io/subnets: your-subnet
+#     alb.ingress.kubernetes.io/target-type: instance
+#     external-dns.alpha.kubernetes.io/hostname: your-host-dns-name
+# spec:
+#   rules:
+#     - http:
+#         paths:
+#           - path: /*
+#             backend:
+#               serviceName: web
+#               servicePort: 5000
